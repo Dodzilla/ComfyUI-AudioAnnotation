@@ -276,6 +276,69 @@ def _transcribe_audio(canonical_wav_path: str, model_name: str, language: str, d
     }
 
 
+def _transcribe_audio_reference_mode(
+    canonical_wav_path: str,
+    model_name: str,
+    language: str,
+    device: str,
+) -> Dict[str, Any]:
+    model = _load_whisper_model(model_name, device)
+    segments_iter, info = model.transcribe(
+        canonical_wav_path,
+        language=(language or "").strip() or None,
+        vad_filter=False,
+        word_timestamps=True,
+        beam_size=5,
+        condition_on_previous_text=False,
+        chunk_length=20,
+    )
+
+    segments: List[Dict[str, Any]] = []
+    words: List[Dict[str, Any]] = []
+
+    for segment in segments_iter:
+        segment_words: List[Dict[str, Any]] = []
+        raw_words = list(segment.words or [])
+        if raw_words:
+            for raw_word in raw_words:
+                segment_words.extend(
+                    _segment_words(
+                        getattr(raw_word, "word", "") or "",
+                        getattr(raw_word, "start", None),
+                        getattr(raw_word, "end", None),
+                        getattr(raw_word, "probability", None),
+                    )
+                )
+        else:
+            segment_words.extend(
+                _segment_words(
+                    segment.text or "",
+                    getattr(segment, "start", None),
+                    getattr(segment, "end", None),
+                    getattr(segment, "avg_logprob", None),
+                )
+            )
+
+        if segment_words:
+            words.extend(segment_words)
+
+        segments.append(
+            {
+                "start": _safe_float(getattr(segment, "start", None)),
+                "end": _safe_float(getattr(segment, "end", None)),
+                "text": (segment.text or "").strip(),
+                "confidence": _safe_float(getattr(segment, "avg_logprob", None)),
+            }
+        )
+
+    detected_language = getattr(info, "language", None) or (language or "en")
+    return {
+        "language": detected_language,
+        "segments": segments,
+        "words": words,
+    }
+
+
 def _build_reference_alignment(
     reference: ReferenceLyrics,
     transcript: Dict[str, Any],
@@ -525,7 +588,11 @@ def _build_annotation(
     device: str,
 ) -> Dict[str, Any]:
     structure = _analyze_beats(canonical_wav_path)
-    transcript = _transcribe_audio(canonical_wav_path, transcription_model, language, device)
+    transcript = (
+        _transcribe_audio_reference_mode(canonical_wav_path, transcription_model, language, device)
+        if reference_lyrics_text.strip()
+        else _transcribe_audio(canonical_wav_path, transcription_model, language, device)
+    )
 
     if reference_lyrics_text.strip():
         reference = _parse_reference_lyrics(reference_lyrics_text)
